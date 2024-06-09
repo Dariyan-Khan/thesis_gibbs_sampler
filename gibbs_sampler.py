@@ -1,11 +1,12 @@
 from scipy.linalg import orthogonal_procrustes
 import numpy as np
 from scipy.stats import beta
+from scipy.stats import multivariate_normal, truncnorm, invwishart
 
 
 class Synthetic_data():
 
-    def __init__(self, μ_1, μ_2, prior, N_t=1000):
+    def __init__(self, μ_1, μ_2, K, prior, N_t=1000):
         # prior has to be a function which takes no arguments and spits out a sample
 
         # assert len(μ_1) == 2, "μ_1 and μ_2 have to be a 2D vector"
@@ -13,10 +14,12 @@ class Synthetic_data():
 
         self.μ_1 = μ_1
         self.μ_2 = μ_2
+        self.K = K
         self.mean_len = len(μ_1)
         self.N_t=N_t
         self.adj_mat, self.bern_params = self.simulate_adj_mat(prior, μ_1, μ_2)
         self.embds = self.spectral_emb()
+        self.normed_embds = self.embds / np.linalg.norm(self.embds, axis=1)[:, np.newaxis]
 
 
         self.bern_params = np.array(self.bern_params)
@@ -30,6 +33,11 @@ class Synthetic_data():
         self.r_samples = []
         self.z_samples = []
         self.pi_samples = []
+
+        self.prior_df = 2
+        self.prior_scale_mat = np.eye(self.mean_len)
+
+        self.pi_prior = 1.0 / self.K
 
     def find_delta_inv(self, μ_1, μ_2, exp_rho):
         μ_1_outer = np.outer(μ_1, μ_1)
@@ -105,13 +113,110 @@ class Synthetic_data():
 
         return spectral_embedding
     
+    def Sigma_prior(self, x):
+        return invwishart.pdf(x, self.prior_df, scale=self.prior_scale_mat)
 
-    def z_uppdate(self, )
+    
+    def calculate_density(self, i, mu_zi, Sigma_zi):
+        """
+        Calculate the probability density of the vector tilde{x}    r_i for a multivariate normal distribution
+        characterized by mean mu_zi and covariance Sigma_zi.
+        """
+        curr_r_i = self.r_samples[-1][i]
+        d = len(mu_zi)
+        density = curr_r_i **(d-1) * multivariate_normal.pdf(self.embds[i], mean=mu_zi, cov=Sigma_zi)
+        return density
         
 
 
+    def z_update(self, i):
+        z_probs = [] # list to contain z_probs that we then sample from
+        for k in range(self.K):
+            z_probs = self.pi_samples[-1][k] * self.calculate_density(i, self.mean_samples[-1][k], self.Sigma_samples[-1][k])
+        
+        z_probs = np.array(z_probs)
+        z_probs = z_probs / np.sum(z_probs)
+        z_i = np.random.choice(self.K, p=z_probs)
+        return z_i
+    
+    
+    def sample_r_i(self, i, mu_zi, Sigma_zi):
+        """
+        Generate a sample for r_i using a truncated normal distribution centered at mu_zi
+        with the covariance matrix Sigma_zi as a scale parameter.
+        """
+        a, b = 0, np.inf  # Truncation limits
+        scale = np.sqrt(np.diag(Sigma_zi))  # Scale is the standard deviation
+        curr_r_i = self.r_samples[-1][i]
+        lower, upper = (a - mu_zi) / scale, (b - mu_zi) / scale
+        proposal_r_i = truncnorm.rvs(lower, upper, loc=mu_zi, scale=scale, size=len(mu_zi))
+        
+        # Calculate the densities
+        current_density = self.calculate_density(i, mu_zi, Sigma_zi)
+        proposal_density = self.calculate_density(i, proposal_r_i, Sigma_zi)
+        
+        # Calculate acceptance probability
+        acceptance_probability = min(1, proposal_density / current_density)
+        
+        # Accept or reject the proposal
+        if np.random.rand() < acceptance_probability:
+            return proposal_r_i
+        else:
+            return curr_r_i
+    
+    
+    def mean_and_sigma_sample_density(self, μ_k, Σ_k, k):
+        prob = 1
+        for i, group in enumerate(self.z_samples[-1]):
+            if group == k:
+                prob *= self.calculate_density(i, μ_k, Σ_k)
+        
+        prob * multivariate_normal.pdf(self.embds[i], mean=μ_k, cov=Σ_k)
+        prob *= self.Sigma_prior(Σ_k)
+        return prob
+    
+
+    
+    def sample_mean_and_sigma(self, k):
+        # Current parameters
+        current_mu_k = self.mu[-1][k]
+        current_sigma_k = self.sigma[-1][k]
+        
+        # Proposal generation
+        proposed_mu_k = multivariate_normal.rvs(mean=current_mu_k, cov=np.eye(len(current_mu_k)) * 0.01)
+        proposed_sigma_k = invwishart.rvs(df=len(current_sigma_k) + 1, scale=current_sigma_k)
+        
+        # Compute the densities for the current and proposed parameters
+        current_density = self.sample_density(current_mu_k, current_sigma_k, k)
+        proposed_density = self.sample_density(proposed_mu_k, proposed_sigma_k, k)
+        
+        # Compute acceptance probability
+        acceptance_ratio = proposed_density / current_density
+        
+        # Accept or reject the proposal based on the computed probability
+        if np.random.rand() < acceptance_ratio:
+            return proposed_mu_k, proposed_sigma_k
+        else:
+            return current_mu_k, current_sigma_k
+    
+
+
+    
+    def sample_pi(self):
+        num_in_each_group = np.zeros(self.K)
+        for group in self.z_samples[-1]:
+            num_in_each_group[group] += 1
+        
+        # Sample from the Dirichlet distribution with parameters (n_1 + self.pi_prior, ..., n_K + self.pi_prior)
+
+        new_pi = np.random.dirichlet(num_in_each_group + self.pi_prior)
+
+        return new_pi
+    
+
 
     def gibbs_sampler(self):
+
         
 
 
